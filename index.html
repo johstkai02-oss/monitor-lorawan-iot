@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Monitor IoT / LoRaWAN US915</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; font-family: monospace; user-select: none; }
+    body { background: #060913; color: #e2e8f0; display: flex; justify-content: center; align-items: center; min-height: 100vh; padding: 12px; }
+    .app { background: #0f172a; border: 2px solid #06b6d4; border-radius: 16px; padding: 15px; width: 100%; max-width: 410px; }
+    .top { display: flex; justify-content: space-between; font-size: 11px; color: #22d3ee; font-weight: bold; margin-bottom: 10px; }
+    select, button { width: 100%; padding: 10px; border-radius: 8px; border: none; font-weight: bold; font-size: 11px; margin-bottom: 8px; }
+    select { background: #1e293b; color: #fff; border: 1px solid #334155; }
+    .pantalla { background: #030712; border: 1px solid #1e293b; border-radius: 8px; height: 125px; margin-bottom: 10px; position: relative; }
+    canvas { width: 100%; height: 100%; display: block; }
+    .tag-freq { position: absolute; top: 6px; left: 8px; font-size: 10px; color: #67e8f9; background: rgba(3,7,18,0.85); padding: 2px 6px; border-radius: 4px; }
+    .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-bottom: 10px; text-align: center; }
+    .box { background: #0b1120; padding: 7px 4px; border-radius: 8px; border: 1px solid #1e293b; font-size: 10px; }
+    .box b { font-size: 12px; color: #fff; display: block; margin-top: 2px; }
+    button { color: #fff; cursor: pointer; }
+    .b-ping { background: #0891b2; } .b-base { background: #2563eb; } .b-sav { background: #16a34a; }
+    .logs { background: #030712; border: 1px dashed #334155; padding: 8px; border-radius: 8px; max-height: 85px; overflow-y: auto; font-size: 10px; color: #94a3b8; }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <div class="top"><span>🌐 IOT LORAWAN (HELIUM / TTN)</span><span id="gpsLora">ECUADOR US915</span></div>
+    <select id="selSf" onchange="calcLora()">
+      <option value="7">⚡ SF7 - Corto Alcance / Rápido (Hasta 2 km)</option>
+      <option value="9">⚖️ SF9 - Equilibrado Ciudad / Finca (Hasta 6 km)</option>
+      <option value="12">🌲 SF12 - Máxima Penetración Selva (Hasta 15 km)</option>
+    </select>
+    <select id="selSensor" onchange="calcLora()">
+      <option value="Clima / Lluvia">🌦️ Nodo: Estación Meteorológica</option>
+      <option value="Rastreo GPS">🐄 Nodo: Rastreador GPS Ganado / Activos</option>
+      <option value="Nivel Río / Agua">💧 Nodo: Sensor Nivel de Agua / Riego</option>
+      <option value="Helium Gateway">📡 Gateway Base: Antena Helium / TTN</option>
+    </select>
+    <div class="pantalla">
+      <div class="tag-freq">BANDA: 915 MHz | ANTENA: 8.2 cm</div>
+      <canvas id="cvLora"></canvas>
+    </div>
+    <div class="grid">
+      <div class="box">DIST. GATEWAY<b id="vDistLora">0 m</b></div>
+      <div class="box">SENSIBILIDAD<b id="vSens">-123 dBm</b></div>
+      <div class="box">ENLACE EST.<b id="vSnr">+8 dB SNR</b></div>
+    </div>
+    <button class="b-base" onclick="fijarGateway()">📍 FIJAR UBICACIÓN GATEWAY BASE</button>
+    <button class="b-ping" onclick="enviarPaquete()">📤 SIMULAR UPLINK PAQUETE LORA</button>
+    <button class="b-sav" onclick="guardarNodo()">💾 GUARDAR NODO EN MAPA DE RED</button>
+    <div class="logs" id="logsLora"></div>
+  </div>
+  <script>
+    const KEY_LORA = 'monitor_lorawan_v1';
+    let gwLat = null, gwLon = null, curLat = null, curLon = null, distKm = 0, estDbm = -75, pulsoX = -1;
+    let nodos = JSON.parse(localStorage.getItem(KEY_LORA)) || [];
+
+    if (navigator.geolocation) {
+      navigator.geolocation.watchPosition(p => {
+        curLat = p.coords.latitude; curLon = p.coords.longitude;
+        document.getElementById('gpsLora').innerText = `${curLat.toFixed(4)}, ${curLon.toFixed(4)}`;
+        if (gwLat === null) { gwLat = curLat; gwLon = curLon; }
+        calcLora();
+      }, () => {}, { enableHighAccuracy: true });
+    }
+
+    function fijarGateway() {
+      if (curLat !== null) { gwLat = curLat; gwLon = curLon; calcLora(); alert('Ubicación del Gateway LoRaWAN fijada.'); }
+    }
+    function calcLora() {
+      if (gwLat !== null && curLat !== null) {
+        const R = 6371, dLat = (curLat - gwLat) * Math.PI / 180, dLon = (curLon - gwLon) * Math.PI / 180;
+        const a = Math.sin(dLat/2)**2 + Math.cos(gwLat*Math.PI/180)*Math.cos(curLat*Math.PI/180)*Math.sin(dLon/2)**2;
+        distKm = R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+      }
+      const sf = parseInt(document.getElementById('selSf').value);
+      const sens = sf === 7 ? -123 : (sf === 9 ? -129 : -137);
+      const dMetros = Math.max(15, distKm * 1000);
+      const perdida = 20 * Math.log10(915) + 28 * Math.log10(dMetros / 1000) + 32.44;
+      estDbm = Math.round(20 - perdida); // TX 20 dBm (100 mW legal US915)
+      const snr = Math.max(-20, Math.min(15, Math.round((estDbm - sens) / 3)));
+
+      document.getElementById('vDistLora').innerText = distKm < 1 ? `${Math.round(distKm*1000)} m` : `${distKm.toFixed(2)} km`;
+      document.getElementById('vSens').innerText = `${sens} dBm`;
+      document.getElementById('vSnr').innerText = `${snr > 0 ? '+' : ''}${snr} dB SNR`;
+    }
+    function enviarPaquete() {
+      pulsoX = 0;
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.frequency.setValueAtTime(300, ctx.currentTime);
+      o.frequency.exponentialRampToValueAtTime(1800, ctx.currentTime + 0.18); // Barrido Chirp CSS real
+      g.gain.setValueAtTime(0.08, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.01, ctx.currentTime + 0.18);
+      o.connect(g); g.connect(ctx.destination);
+      o.start(); o.stop(ctx.currentTime + 0.18);
+    }
+
+    function guardarNodo() {
+      const sf = document.getElementById('selSf').value;
+      const tipo = document.getElementById('selSensor').value;
+      const d = distKm < 1 ? `${Math.round(distKm*1000)}m` : `${distKm.toFixed(2)}km`;
+      nodos.unshift(`${new Date().toLocaleTimeString()} | ${tipo} | SF${sf} | Dist:${d} | RSSI:${estDbm}dBm`);
+      localStorage.setItem(KEY_LORA, JSON.stringify(nodos));
+      render();
+    }
+    function render() {
+      document.getElementById('logsLora').innerHTML = nodos.map(n => `<div>📡 ${n}</div>`).join('') || 'Sin nodos registrados...';
+    }
+
+    const cv = document.getElementById('cvLora'), c = cv.getContext('2d');
+    function animar() {
+      cv.width = cv.offsetWidth; cv.height = cv.offsetHeight;
+      c.fillStyle = '#030712'; c.fillRect(0, 0, cv.width, cv.height);
+      c.strokeStyle = '#1e293b'; c.lineWidth = 1;
+      for (let y = 25; y < cv.height; y += 25) { c.beginPath(); c.moveTo(0, y); c.lineTo(cv.width, y); c.stroke(); }
+
+      if (pulsoX >= 0) {
+        c.beginPath(); c.strokeStyle = '#22d3ee'; c.lineWidth = 2.5;
+        for (let i = 0; i < 60; i++) {
+          const x = pulsoX + i;
+          const freqChirp = 0.05 + (i * 0.012); // Modulación Chirp Spread Spectrum
+          const y = (cv.height / 2) + Math.sin(i * freqChirp) * 32;
+          i === 0 ? c.moveTo(x, y) : c.lineTo(x, y);
+        }
+        c.stroke();
+        pulsoX += 8;
+        if (pulsoX > cv.width) pulsoX = -1;
+      }
+      requestAnimationFrame(animar);
+    }
+    calcLora(); render(); animar();
+  </script>
+</body>
+</html>
